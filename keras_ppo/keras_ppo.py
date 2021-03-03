@@ -7,14 +7,30 @@ from tensorflow.keras.models import load_model, clone_model
 import tensorflow.keras.backend as K
 import numpy as np
 
-tf.keras.backend.set_floatx('float64')
+#from intrinsic_curiosity_module import IntrinsicCuriosityModule
 
-def ppo_loss(old_policy):
-    pass
+class Experience:
+    def __init__(self, state, action, reward, next_state, done):
+        self.state = state
+        self.action = action
+        self.reward = reward
+        self.next_state = next_state
+        self.done = done
+    
+    @property
+    def optimal_action(self):
+        return np.argmax(self.action_probs)
+
+    @property
+    def sample_action(self):
+        return np.random.choice(
+            len(self.action_probs),
+            p=self.action_prob
+        )
 
 class Agent:
     def __init__(self, input_shape=None, action_num=None, alpha=0.0001,
-                 beta=0.0005, gamma=0.99, entropy_coef=0.1, entropy_decay=0.99,
+                 beta=0.0005, gamma=0.99, eta=10, entropy_coef=0.1, entropy_decay=0.99,
                  actor_loss_epsilon=0.2, actor_file=None, critic_file=None,
                  training=True):
         if actor_file == None:
@@ -24,18 +40,21 @@ class Agent:
         else:
             self.actor = load_model(actor_file)
         if training:
-            self.states = []
-            self.actions = []
-            self.rewards = []
-            self.next_states = []
-            self.dones = []
+            self.grad_tape = tf.GradientTape(persistent=True)
+            self.experiences = []
             self.gamma = gamma
+            self.eta = eta
             self.entropy_coef = entropy_coef
             self.entropy_decay = entropy_decay
             self.actor_loss_epsilon = actor_loss_epsilon
             self.actor_optimizer = Adam(learning_rate=alpha)
             self.critic_optimizer = Adam(learning_rate=beta)
             self.critic_loss_func = MeanSquaredError()
+            #self.icm = IntrinsicCuriosityModule(
+            #    input_shape,
+            #    action_num,
+            #    64
+            #)
             if critic_file == None:
                 if input_shape == None:
                     raise Exception('input_shape is required when no critic file is specified.')
@@ -51,13 +70,13 @@ class Agent:
         self.rewards.append(reward)
         self.next_states.append(next_state)
         self.dones.append(done)
-        assert (
-            len(self.states)
-            == len(self.actions)
-            == len(self.rewards)
-            == len(self.next_states)
-            == len(self.dones)
-        )
+
+    def step(self, env, state):
+        action_probs = self.actor(state)
+        action = np.random.choice(len(action_probs), p=action_probs)
+        next_state, reward, done, _ = env.step(action)
+        reward += self.imc
+        experience = Experience(state, action, reward, reward, done)
 
     def learn(self):
         if not hasattr(self, 'critic'):
@@ -78,6 +97,7 @@ class Agent:
             indices = K.stack((np.arange(len(action_probs)), self.actions), 1)
             action_prob = K.expand_dims(tf.gather_nd(action_probs, indices), 1)
             prev_action_prob = K.expand_dims(tf.gather_nd(self.prev_actor(states), indices), 1)
+            
             advantage = critic_target - critic_value
             prob_ratio = K.exp(K.log(action_prob) - K.log(prev_action_prob + 1e-10))
             entropy = K.expand_dims(-K.sum(action_probs * K.log(action_probs), 1), 1)
